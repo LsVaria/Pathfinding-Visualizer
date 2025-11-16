@@ -93,9 +93,9 @@ If you have ideas for new algorithms or UI improvements, feel free to **fork thi
 
 ## 👨‍💻 Author
 
-**Kartik Jain**  
-📧 [jainkartik154@gmail.com](mailto:jainkartik154@gmail.com)  
-🌐 [GitHub – Kartikjain75](https://github.com/Kartikjain75)
+**Lal Singh**  
+📧 [lalvariah@gmail.com](mailto:lalvariah@gmail.com)  
+🌐 [GitHub – LsVaria](https://github.com/LsVaria)
 
 ---
 
