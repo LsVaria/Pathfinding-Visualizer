@@ -1,6 +1,7 @@
 import pygame
 import math
 import os
+import random
 from queue import PriorityQueue, Queue, LifoQueue
 
 # ========== INITIAL SETUP ==========
@@ -10,8 +11,8 @@ pygame.font.init()
 info = pygame.display.Info()
 screen_width, screen_height = info.current_w, info.current_h
 
-GRID_WIDTH = int(min(screen_width, screen_height) * 0.75)
-UI_WIDTH = 500
+GRID_WIDTH = screen_height
+UI_WIDTH = 672
 WINDOW_HEIGHT = max(GRID_WIDTH, 600)
 TOTAL_WIDTH = GRID_WIDTH + UI_WIDTH
 
@@ -34,6 +35,11 @@ BLACK = (0, 0, 0)
 PURPLE = (138, 43, 226)
 ORANGE = (255, 165, 0)
 GREY = (200, 200, 200)
+
+# ========== CONTROL FLAGS (for interrupt/pause) ==========
+STOP_SEARCH = False     # set True to immediately stop the currently-running algorithm
+PAUSE_SEARCH = False    # toggled by 'P' to pause/resume while an algorithm runs
+CLEAR_ON_STOP = False   # if True when stopping, main will clear grid (set by 'C')
 
 # ========== NODE CLASS ==========
 class Node:
@@ -87,21 +93,125 @@ def h(p1, p2):
     return abs(x1 - x2) + abs(y1 - y2)
 
 def reconstruct_path(came_from, current, draw, ui_surface, algo_name, win, grid_width):
+    """Reconstruct path and return list of nodes so we can animate pulse."""
+    path_nodes = []
+
     while current in came_from:
         current = came_from[current]
         current.make_path()
+
+        path_nodes.append(current)
+
         draw()
         draw_ui_window(ui_surface, algo_name)
-        # Blit both surfaces to main window
         win.blit(GRID_SURFACE, (0, 0))
         win.blit(UI_SURFACE, (grid_width, 0))
-        # Redraw divider line
         pygame.draw.line(win, (180, 180, 180), (grid_width, 0), (grid_width, WINDOW_HEIGHT), 2)
         pygame.display.update()
 
-# ========== ALGORITHMS ==========
+    return path_nodes
 
+def electric_pulse_path(path_nodes, grid, win, ui_surface, algo_name, grid_width, pulses=1, step_delay=35):
+    """Electric traveling pulse from start → end along path"""
+
+    if not path_nodes:
+        return
+    
+    # path_nodes is in reverse order (end → start)
+    path = list(reversed(path_nodes))
+
+    # Save original colors
+    original = {node: node.color for node in path}
+
+    BRIGHT = (255, 255, 255)    # white flash
+    HALO = (150, 200, 255)      # bluish, faint glow
+
+    for _ in range(pulses):
+        for i, node in enumerate(path):
+
+            # Reset behind
+            if i - 2 >= 0:
+                path[i-2].color = original[path[i-2]]
+
+            # Dim behind
+            if i - 1 >= 0:
+                path[i-1].color = original[path[i-1]]
+
+            # Main pulse node
+            if random.random() < 0.1:  # 10% tiny flicker chance
+                node.color = (255, 255, 200)
+            #node.color = BRIGHT
+
+            # Next halo
+            if i + 1 < len(path):
+                path[i+1].color = HALO
+
+            # Redraw everything
+            draw_grid_window(GRID_SURFACE, grid, len(grid), grid_width)
+            draw_ui_window(ui_surface, algo_name)
+            win.blit(GRID_SURFACE, (0, 0))
+            win.blit(UI_SURFACE, (grid_width, 0))
+            pygame.draw.line(win, (180, 180, 180),
+                             (grid_width, 0), (grid_width, WINDOW_HEIGHT), 2)
+            pygame.display.update()
+            pygame.time.delay(step_delay)
+
+        # reset for next pass
+        for n in path:
+            n.color = original[n]
+
+    # Final restore: set path to normal YELLOW
+    for n in path:
+        n.make_path()
+
+    draw_grid_window(GRID_SURFACE, grid, len(grid), grid_width)
+    draw_ui_window(ui_surface, algo_name)
+    win.blit(GRID_SURFACE, (0, 0))
+    win.blit(UI_SURFACE, (grid_width, 0))
+    pygame.draw.line(win, (180, 180, 180),
+                     (grid_width, 0), (grid_width, WINDOW_HEIGHT), 2)
+    pygame.display.update()
+
+
+# ========== EVENT HANDLING FOR ALGORITHMS ==========
+def _process_events_during_algorithm():
+    """
+    Process events while an algorithm is running. This consumes events so UI remains responsive.
+    It sets global flags:
+      - STOP_SEARCH True when ESC or C pressed or window closed.
+      - CLEAR_ON_STOP True if C pressed (indicates user wants to clear grid after stop).
+      - PAUSE_SEARCH toggled by 'P'.
+    Returns nothing; state is in globals.
+    """
+    global STOP_SEARCH, PAUSE_SEARCH, CLEAR_ON_STOP
+    for ev in pygame.event.get():
+        if ev.type == pygame.QUIT:
+            STOP_SEARCH = True
+            CLEAR_ON_STOP = False
+            return
+        if ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_c:
+                STOP_SEARCH = True
+                CLEAR_ON_STOP = True
+                return
+            if ev.key == pygame.K_ESCAPE:
+                STOP_SEARCH = True
+                CLEAR_ON_STOP = False
+                return
+            if ev.key == pygame.K_p:
+                # toggle pause
+                PAUSE_SEARCH = not PAUSE_SEARCH
+                # when toggling pause, do not clear or stop
+                return
+        # We intentionally ignore mouse clicks while algorithm runs, they are for the main loop.
+
+# ========== ALGORITHMS (modified to support STOP/PAUSE) ==========
 def a_star(draw, grid, start, end, ui_surface, algo_name, win):
+    global STOP_SEARCH, PAUSE_SEARCH, CLEAR_ON_STOP
+    STOP_SEARCH = False
+    PAUSE_SEARCH = False
+    CLEAR_ON_STOP = False
+
     count = 0
     open_set = PriorityQueue()
     open_set.put((0, count, start))
@@ -114,19 +224,34 @@ def a_star(draw, grid, start, end, ui_surface, algo_name, win):
     open_set_hash = {start}
 
     while not open_set.empty():
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
+        # process events: stop/pause/clear
+        _process_events_during_algorithm()
+        if STOP_SEARCH:
+            return False
+
+        # pause support: block here until unpaused or stopped
+        while PAUSE_SEARCH and not STOP_SEARCH:
+            _process_events_during_algorithm()
+            pygame.time.delay(50)
+        if STOP_SEARCH:
+            return False
 
         current = open_set.get()[2]
-        open_set_hash.remove(current)
+        # safe removal check
+        if current in open_set_hash:
+            open_set_hash.remove(current)
 
         if current == end:
-            reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
+            path_nodes = reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
             end.make_end()
+            electric_pulse_path(path_nodes, grid, win, ui_surface, algo_name, GRID_WIDTH)
             return True
 
+
         for neighbor in current.neighbors:
+            # allow fast abort inside neighbor processing
+            if STOP_SEARCH:
+                return False
             temp_g = g_score[current] + 1
             if temp_g < g_score[neighbor]:
                 came_from[neighbor] = current
@@ -144,12 +269,18 @@ def a_star(draw, grid, start, end, ui_surface, algo_name, win):
         win.blit(UI_SURFACE, (GRID_WIDTH, 0))
         pygame.draw.line(win, (180, 180, 180), (GRID_WIDTH, 0), (GRID_WIDTH, WINDOW_HEIGHT), 2)
         pygame.display.update()
+
         if current != start:
             current.make_closed()
     return False
 
 
 def dijkstra(draw, grid, start, end, ui_surface, algo_name, win):
+    global STOP_SEARCH, PAUSE_SEARCH, CLEAR_ON_STOP
+    STOP_SEARCH = False
+    PAUSE_SEARCH = False
+    CLEAR_ON_STOP = False
+
     pq = PriorityQueue()
     pq.put((0, start))
     dist = {node: float("inf") for row in grid for node in row}
@@ -157,17 +288,27 @@ def dijkstra(draw, grid, start, end, ui_surface, algo_name, win):
     came_from = {}
 
     while not pq.empty():
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
+        _process_events_during_algorithm()
+        if STOP_SEARCH:
+            return False
+
+        while PAUSE_SEARCH and not STOP_SEARCH:
+            _process_events_during_algorithm()
+            pygame.time.delay(50)
+        if STOP_SEARCH:
+            return False
+
         current = pq.get()[1]
 
         if current == end:
-            reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
+            path_nodes = reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
             end.make_end()
+            electric_pulse_path(path_nodes, grid, win, ui_surface, algo_name, GRID_WIDTH)
             return True
 
         for neighbor in current.neighbors:
+            if STOP_SEARCH:
+                return False
             temp = dist[current] + 1
             if temp < dist[neighbor]:
                 came_from[neighbor] = current
@@ -187,23 +328,39 @@ def dijkstra(draw, grid, start, end, ui_surface, algo_name, win):
 
 
 def bfs(draw, grid, start, end, ui_surface, algo_name, win):
+    global STOP_SEARCH, PAUSE_SEARCH, CLEAR_ON_STOP
+    STOP_SEARCH = False
+    PAUSE_SEARCH = False
+    CLEAR_ON_STOP = False
+
     queue = Queue()
     queue.put(start)
     came_from = {}
     visited = {start}
 
     while not queue.empty():
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
+        _process_events_during_algorithm()
+        if STOP_SEARCH:
+            return False
+
+        while PAUSE_SEARCH and not STOP_SEARCH:
+            _process_events_during_algorithm()
+            pygame.time.delay(50)
+        if STOP_SEARCH:
+            return False
+
         current = queue.get()
 
         if current == end:
-            reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
+            path_nodes = reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
             end.make_end()
+            electric_pulse_path(path_nodes, grid, win, ui_surface, algo_name, GRID_WIDTH)
             return True
 
+
         for neighbor in current.neighbors:
+            if STOP_SEARCH:
+                return False
             if neighbor not in visited:
                 visited.add(neighbor)
                 came_from[neighbor] = current
@@ -222,23 +379,39 @@ def bfs(draw, grid, start, end, ui_surface, algo_name, win):
 
 
 def dfs(draw, grid, start, end, ui_surface, algo_name, win):
+    global STOP_SEARCH, PAUSE_SEARCH, CLEAR_ON_STOP
+    STOP_SEARCH = False
+    PAUSE_SEARCH = False
+    CLEAR_ON_STOP = False
+
     stack = LifoQueue()
     stack.put(start)
     came_from = {}
     visited = {start}
 
     while not stack.empty():
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
+        _process_events_during_algorithm()
+        if STOP_SEARCH:
+            return False
+
+        while PAUSE_SEARCH and not STOP_SEARCH:
+            _process_events_during_algorithm()
+            pygame.time.delay(50)
+        if STOP_SEARCH:
+            return False
+
         current = stack.get()
 
         if current == end:
-            reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
+            path_nodes = reconstruct_path(came_from, end, draw, ui_surface, algo_name, win, GRID_WIDTH)
             end.make_end()
+            electric_pulse_path(path_nodes, grid, win, ui_surface, algo_name, GRID_WIDTH)
             return True
 
+
         for neighbor in current.neighbors:
+            if STOP_SEARCH:
+                return False
             if neighbor not in visited:
                 visited.add(neighbor)
                 came_from[neighbor] = current
@@ -312,7 +485,7 @@ def draw_ui_window(ui_surface, algo_name="None"):
         ("Start", (255, 165, 0)),    # Orange
         ("End", (128, 0, 128)),      # Purple
         ("Barrier", (0, 0, 0)),      # Black
-        ("Open Set", (0, 0, 255)),   # Blue
+        ("Open Set", GREEN),         # Blue
         ("Closed Set", (255, 0, 0)), # Red
         ("Path", (255, 255, 0)),     # Yellow
         ("Empty", (255, 255, 255)),  # White
@@ -342,6 +515,7 @@ def draw_ui_window(ui_surface, algo_name="None"):
         ("4 → DFS", (138, 43, 226)),
         ("SPACE → Run", (0, 0, 0)),
         ("C → Clear Grid", (0, 0, 0)),
+        ("P → Pause/Resume", (0, 0, 0)),  # added hint for pause
     ]
 
     algo_box_height = 200
@@ -356,17 +530,14 @@ def draw_ui_window(ui_surface, algo_name="None"):
         ui_surface.blit(text, (algo_legend_x, y_offset + 4))
 
     # --- Instructions Box ---
-    instructions_y = 560
+    instructions_y = 550
     instructions_font = pygame.font.SysFont("times new roman", 16, bold=True)
     instructions = [
         "  RULES :",
         "• Left Click: Place Start/End/Barriers",
-        "• Right Click: Remove Nodes",
-        "• Select algorithm (1-4), then press SPACE"
+        "• Select algorithm (1-4), then press SPACE",
+        "• While running: P → Pause/Resume, C → Stop & Clear"
     ]
-    
-    #pygame.draw.rect(ui_surface, (255, 255, 255), (algo_legend_x - 5, instructions_y - 30, box_width, 60), border_radius=8)
-    #pygame.draw.rect(ui_surface, (180, 180, 180), (algo_legend_x - 5, instructions_y - 30, box_width, 60), 2, border_radius=8)
     
     for i, instruction in enumerate(instructions):
         text = instructions_font.render(instruction, True, (50, 50, 50))
@@ -383,6 +554,7 @@ def get_clicked_pos(pos, rows, width):
 
 # ========== MAIN LOOP ==========
 def main(win, grid_surface, ui_surface, grid_width):
+    global STOP_SEARCH, PAUSE_SEARCH, CLEAR_ON_STOP
     ROWS = 40
     grid = make_grid(ROWS, grid_width)
 
@@ -405,7 +577,7 @@ def main(win, grid_surface, ui_surface, grid_width):
     pygame.display.update()
 
     while run:
-        # Handle events
+        # Handle events (main loop)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 run = False
@@ -471,6 +643,7 @@ def main(win, grid_surface, ui_surface, grid_width):
 
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_c:
+                    # immediate clear (works while idle)
                     start = None
                     end = None
                     grid = make_grid(ROWS, grid_width)
@@ -478,6 +651,7 @@ def main(win, grid_surface, ui_surface, grid_width):
                     win.blit(grid_surface, (0, 0))
                     pygame.draw.line(win, (180, 180, 180), (grid_width, 0), (grid_width, WINDOW_HEIGHT), 2)
                     pygame.display.update()
+                    # if an algorithm were running, they'd set STOP_SEARCH via event processing inside algorithms
 
                 if event.key == pygame.K_1:
                     algo = "A*"
@@ -527,15 +701,30 @@ def main(win, grid_surface, ui_surface, grid_width):
 
                     grid_draw = lambda: draw_grid_window(grid_surface, grid, ROWS, grid_width)
                     
+                    # Run chosen algorithm. Algorithms themselves handle pause/stop events.
                     if algo == "A*":
-                        a_star(grid_draw, grid, start, end, ui_surface, algo, win)
+                        result = a_star(grid_draw, grid, start, end, ui_surface, algo, WIN)
                     elif algo == "Dijkstra":
-                        dijkstra(grid_draw, grid, start, end, ui_surface, algo, win)
+                        result = dijkstra(grid_draw, grid, start, end, ui_surface, algo, WIN)
                     elif algo == "BFS":
-                        bfs(grid_draw, grid, start, end, ui_surface, algo, win)
+                        result = bfs(grid_draw, grid, start, end, ui_surface, algo, WIN)
                     elif algo == "DFS":
-                        dfs(grid_draw, grid, start, end, ui_surface, algo, win)
-                    
+                        result = dfs(grid_draw, grid, start, end, ui_surface, algo, WIN)
+                    else:
+                        result = None
+
+                    # After algorithm returns, if STOP_SEARCH and CLEAR_ON_STOP were set, clear grid
+                    if STOP_SEARCH and CLEAR_ON_STOP:
+                        start = None
+                        end = None
+                        grid = make_grid(ROWS, grid_width)
+                        draw_grid_window(grid_surface, grid, ROWS, grid_width)
+                        # reset flags so main loop continues normally
+                        STOP_SEARCH = False
+                        CLEAR_ON_STOP = False
+                        PAUSE_SEARCH = False
+
+                    # Redraw everything after run/stop
                     draw_grid_window(grid_surface, grid, ROWS, grid_width)
                     draw_ui_window(ui_surface, algo)
                     win.blit(grid_surface, (0, 0))
@@ -544,8 +733,37 @@ def main(win, grid_surface, ui_surface, grid_width):
                     pygame.display.update()
 
         # Small delay to prevent high CPU usage
-        pygame.time.Clock().tick(6)
+        pygame.time.Clock().tick(60)
 
     pygame.quit()
 
-main(WIN, GRID_SURFACE, UI_SURFACE, GRID_WIDTH)
+# Entry
+def draw_grid_lines(win, rows, width):
+    gap = width // rows
+    for i in range(rows):
+        pygame.draw.line(win, GREY, (0, i * gap), (width, i * gap))
+        for j in range(rows):
+            pygame.draw.line(win, GREY, (j * gap, 0), (j * gap, width))
+
+def draw_grid_window(surface, grid, rows, width):
+    """Draw only the grid visualization on the grid surface"""
+    surface.fill((255, 215, 0) )
+
+    for row in grid:
+        for node in row:
+            node.draw(surface)
+    draw_grid_lines(surface, rows, width)
+
+def make_grid(rows, width):
+    grid = []
+    gap = width // rows
+    for i in range(rows):
+        grid.append([Node(i, j, gap, rows) for j in range(rows)])
+    return grid
+
+# Keep draw_ui_window as defined earlier in the original code (same UI)
+# We already defined it above; ensure the name is available.
+
+if __name__ == "__main__":
+    main(WIN, GRID_SURFACE, UI_SURFACE, GRID_WIDTH)
+
